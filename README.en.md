@@ -16,7 +16,7 @@ Automatic action rules:
 - Repository discovery only computes the current local branch status. Other local branches are refreshed on demand when selected
 - Current local branch: `git pull --ff-only origin <branch>`
 - Non-current local branch: fast-forward the local branch pointer without switching the working tree
-- Remote branch: create or fast-forward the matching local branch, set its upstream, and leave the current working tree unchanged
+- Remote branch: use the remote branch as the source to create or update the matching local branch. Newly created local branches and non-current local branches updated from a remote branch get their upstream set; the current branch is updated with an explicit pull
 - Tracked uncommitted changes, non-fast-forward target branches, or unknown remote state: skip and show the reason
 - Existing non-Git directories or mismatched origins: `skip` and mark as conflict
 
@@ -68,7 +68,7 @@ The frontend includes Chinese and English UI text. The language switcher is in t
 - Repository discovery only computes the current local branch state to keep the list fast.
 - Selecting another local branch triggers a separate status refresh for that branch against `origin/<branch>`.
 - While branch status is loading, the repository card shows a loading indicator and temporarily disables card actions.
-- Selecting a remote branch does not compute local ahead/behind state. Sync will create or fast-forward the corresponding local branch and set its upstream to the matching `origin/<branch>`.
+- Selecting a remote branch does not compute local ahead/behind state. Sync uses that remote branch as the source to create or update the matching local branch. Newly created local branches and non-current local branches updated from a remote branch get their upstream set to the matching `origin/<branch>`; if the matching local branch is the current branch, it is updated with an explicit pull.
 - The backend sync endpoint always rechecks the working tree, origin, tracked changes, and fast-forward conditions before running Git commands. Frontend state is used only for display and interaction.
 
 ## Configuration
