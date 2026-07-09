@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Check, Download, GitPullRequestArrow, Info, RefreshCw, Search, Shield, X } from "lucide-react";
 import "./styles.css";
@@ -189,6 +189,8 @@ function App() {
   const [syncBatch, setSyncBatch] = useState(new Set());
   const [toast, setToast] = useState(null);
   const [detail, setDetail] = useState(null);
+  const toastTimerRef = useRef(null);
+  const messageTimerRef = useRef(null);
 
   const filteredRepos = useMemo(() => {
     return repos.filter((repo) => {
@@ -219,18 +221,21 @@ function App() {
   }
 
   function showToast(type, notice, sticky = false, detailNotice = null) {
-    setToast({ type, notice, detail: detailNotice || notice });
-    window.clearTimeout(showToast.timer);
+    const nextToast = { type, notice, detail: detailNotice || notice };
+    setToast(nextToast);
+    window.clearTimeout(toastTimerRef.current);
     if (!sticky) {
-      showToast.timer = window.setTimeout(() => setToast(null), 5000);
+      toastTimerRef.current = window.setTimeout(() => {
+        setToast((current) => (current === nextToast ? null : current));
+      }, 5000);
     }
   }
 
   function showMessage(notice, autoClearMs = 0) {
-    window.clearTimeout(showMessage.timer);
+    window.clearTimeout(messageTimerRef.current);
     setMessageNotice(notice);
     if (autoClearMs > 0) {
-      showMessage.timer = window.setTimeout(() => {
+      messageTimerRef.current = window.setTimeout(() => {
         setMessageNotice((current) => (current === notice ? null : current));
       }, autoClearMs);
     }
