@@ -620,6 +620,10 @@ button:disabled { opacity: .55; cursor: progress; }
   color: #1d58c8;
   background: #e6efff;
 }
+.branch-kind.local-only {
+  color: #8a5a08;
+  background: #fff2cf;
+}
 .branch-loading {
   width: 10px;
   height: 10px;
@@ -724,6 +728,7 @@ button:disabled { opacity: .55; cursor: progress; }
 }
 .progress-row svg { margin-top: 2px; }
 .progress-row.success svg { color: var(--green); }
+.progress-row.skipped svg { color: var(--amber); }
 .progress-row.failed svg { color: var(--red); }
 .progress-row span {
   min-width: 0;

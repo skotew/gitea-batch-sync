@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Check, Download, GitPullRequestArrow, Info, RefreshCw, Search, Shield, X } from "lucide-react";
 import "./styles.css";
@@ -15,11 +15,12 @@ const translations = {
     username: "用户名",
     password: "密码",
     apiTip: "这一组只用于调用 Gitea API 获取当前用户可访问的仓库列表。",
-    cloneProtocol: "Clone 协议",
+    cloneProtocol: "新仓库 Clone 协议",
     sshKeyPath: "SSH key 文件路径",
     sshKeyPlaceholder: "留空则使用 ssh-agent 或 ~/.ssh/config",
     sshTip: "指定路径时，后端只把路径传给 git 的 GIT_SSH_COMMAND，不读取、不保存私钥内容。",
-    httpTip: "HTTP(S) clone/pull 会临时使用上面的 API 认证，不会把密码或 token 写入 remote URL。",
+    httpTip: "新 clone 的 HTTP(S) 仓库会临时使用上面的 API 认证，不会把密码或 token 写入 remote URL。",
+    existingOriginTip: "已存在仓库始终通过自身 origin 更新；切换此项不会改写 origin。若协议不同，仓库会标记为冲突，请先在本地手动调整 origin。",
     targetPath: "目标路径",
     targetPlaceholder: "/path/to/local/workspace",
     directoryMode: "目录结构",
@@ -44,6 +45,8 @@ const translations = {
     branchSearchPlaceholder: "搜索分支",
     targetBranch: "目标分支",
     localBranch: "本地",
+    localOnlyBranch: "仅本地",
+    localOnlyBranchTip: "该本地分支没有对应的 origin 分支，工具不会同步它。",
     remoteBranch: "远程",
     noBranches: "暂无分支",
     branchLoading: "正在加载分支状态...",
@@ -68,7 +71,8 @@ const translations = {
     chooseRepo: "请先选择仓库",
     loadingSync: (count) => `正在同步 ${count} 个仓库...`,
     syncDone: "同步完成，全部成功",
-    syncFailed: (count) => `同步完成，${count} 个失败`,
+    syncFailed: (failed, skipped) => `同步完成，${failed} 个失败${skipped ? `，${skipped} 个跳过` : ""}`,
+    syncSkipped: (count) => `同步完成，已跳过 ${count} 个仓库`,
     requestFailed: "请求失败",
     status: {
       missing: "待拉取",
@@ -91,11 +95,12 @@ const translations = {
     username: "Username",
     password: "Password",
     apiTip: "This section is only used to call the Gitea API and list repositories accessible to the current user.",
-    cloneProtocol: "Clone protocol",
+    cloneProtocol: "New repository clone protocol",
     sshKeyPath: "SSH key path",
     sshKeyPlaceholder: "Leave empty to use ssh-agent or ~/.ssh/config",
     sshTip: "When a path is provided, the backend only passes it to GIT_SSH_COMMAND. It does not read or store the private key.",
-    httpTip: "HTTP(S) clone/pull uses the API credentials temporarily and never writes passwords or tokens into remote URLs.",
+    httpTip: "New HTTP(S) clones use the API credentials temporarily and never write passwords or tokens into remote URLs.",
+    existingOriginTip: "Existing repositories always update through their own origin. Changing this option does not rewrite origin; if the protocols differ, the repository is marked as a conflict. Adjust origin locally first.",
     targetPath: "Target path",
     targetPlaceholder: "/path/to/local/workspace",
     directoryMode: "Directory layout",
@@ -120,6 +125,8 @@ const translations = {
     branchSearchPlaceholder: "Search branches",
     targetBranch: "Target branch",
     localBranch: "Local",
+    localOnlyBranch: "Local only",
+    localOnlyBranchTip: "This local branch has no matching origin branch, so the tool will not sync it.",
     remoteBranch: "Remote",
     noBranches: "No branches",
     branchLoading: "Loading branch status...",
@@ -144,7 +151,8 @@ const translations = {
     chooseRepo: "Select repositories first",
     loadingSync: (count) => `Syncing ${count} repositories...`,
     syncDone: "Sync completed successfully",
-    syncFailed: (count) => `Sync completed with ${count} failures`,
+    syncFailed: (failed, skipped) => `Sync completed with ${failed} failures${skipped ? ` and ${skipped} skipped` : ""}`,
+    syncSkipped: (count) => `Sync completed with ${count} repositories skipped`,
     requestFailed: "Request failed",
     status: {
       missing: "Missing",
@@ -269,7 +277,7 @@ function App() {
 
   async function syncSelected() {
     if (branchStatusLoading) return;
-    const picked = repos.filter((repo) => selected.has(repo.full_name));
+    const picked = repos.filter((repo) => selected.has(repo.full_name) && !isRepoSyncBlocked(repo));
     if (!picked.length) {
       showMessage({ key: "chooseRepo" }, 5000);
       return;
@@ -296,11 +304,16 @@ function App() {
         }
         setProgress({ running: true, done: index + 1, total: picked.length, current: repo.full_name });
       }
-      const failed = nextResults.filter((item) => !item.success).length;
+      const failed = nextResults.filter((item) => syncOutcome(item) === "failed").length;
+      const skipped = nextResults.filter((item) => syncOutcome(item) === "skipped").length;
       await discover(true);
-      const doneNotice = failed ? { key: "syncFailed", args: [failed] } : { key: "syncDone" };
+      const doneNotice = failed
+        ? { key: "syncFailed", args: [failed, skipped] }
+        : skipped
+          ? { key: "syncSkipped", args: [skipped] }
+          : { key: "syncDone" };
       showMessage(doneNotice, failed ? 0 : 5000);
-      showToast(failed ? "error" : "success", doneNotice);
+      showToast(failed ? "error" : skipped ? "info" : "success", doneNotice);
     } catch (error) {
       const errorNotice = { text: error.message };
       showMessage(errorNotice);
@@ -316,12 +329,12 @@ function App() {
 
   function toggleAll(value) {
     if (busy) return;
-    setSelected(new Set(value ? filteredRepos.filter((repo) => repo.action !== "skip" && !isRepoLocked(repo, syncingRepo, syncBatch)).map((repo) => repo.full_name) : []));
+    setSelected(new Set(value ? filteredRepos.filter((repo) => !isRepoSyncBlocked(repo) && !isRepoLocked(repo, syncingRepo, syncBatch)).map((repo) => repo.full_name) : []));
   }
 
   function toggleRepo(fullName) {
     const repo = repos.find((item) => item.full_name === fullName);
-    if (busy || (repo && isRepoLocked(repo, syncingRepo, syncBatch))) return;
+    if (busy || (repo && (isRepoSyncBlocked(repo) || isRepoLocked(repo, syncingRepo, syncBatch)))) return;
     const next = new Set(selected);
     next.has(fullName) ? next.delete(fullName) : next.add(fullName);
     setSelected(next);
@@ -332,6 +345,13 @@ function App() {
     const targetRepo = repos.find((repo) => repo.full_name === fullName);
     if (targetRepo && isRepoLocked(targetRepo, syncingRepo, syncBatch)) return;
     const shouldLoadStatus = branch.kind === "local" && (!branch.is_current || !branch.sync_status);
+    if (branch.kind === "local" && branch.is_remote_missing) {
+      setSelected((items) => {
+        const next = new Set(items);
+        next.delete(fullName);
+        return next;
+      });
+    }
     setRepos((items) => items.map((repo) => {
       if (repo.full_name !== fullName) return repo;
       return {
@@ -439,6 +459,7 @@ function App() {
             ) : (
               <Tip tone="http">{t.httpTip}</Tip>
             )}
+            <Tip>{t.existingOriginTip}</Tip>
           </ConfigGroup>
 
           <ConfigGroup title={t.localGroup}>
@@ -519,6 +540,7 @@ function App() {
                 repo={repo}
                 selected={selected.has(repo.full_name)}
                 locked={isRepoLocked(repo, syncingRepo, syncBatch)}
+                syncBlocked={isRepoSyncBlocked(repo)}
                 loadingText={syncingRepo === repo.full_name ? t.repoSyncing : selectedBranchLoading(repo) ? t.branchLoading : ""}
                 language={language}
                 t={t}
@@ -534,12 +556,12 @@ function App() {
   );
 }
 
-function RepoCard({ repo, selected, locked, loadingText, language, t, onToggle, onBranchChange }) {
+function RepoCard({ repo, selected, locked, syncBlocked, loadingText, language, t, onToggle, onBranchChange }) {
   return (
     <article className={`repo-card ${locked ? "locked" : ""}`}>
       {loadingText ? <div className="repo-card-loading"><span />{loadingText}</div> : null}
       <label className="repo-check">
-        <input type="checkbox" disabled={locked || repo.action === "skip"} checked={selected} onChange={onToggle} />
+        <input type="checkbox" disabled={locked || syncBlocked} checked={selected} onChange={onToggle} />
       </label>
       <div className="repo-main">
         <div className="repo-title">
@@ -592,6 +614,18 @@ function selectedBranchLoading(repo) {
   return Boolean(selectedBranch(repo)?.loading);
 }
 
+
+function selectedBranchIsLocalOnly(repo) {
+  const branch = selectedBranch(repo);
+  return branch?.kind === "local" && branch.is_remote_missing;
+}
+
+
+function isRepoSyncBlocked(repo) {
+  return repo.action === "skip" || selectedBranchIsLocalOnly(repo);
+}
+
+
 function isRepoLocked(repo, syncingRepo, syncBatch = new Set()) {
   return syncBatch.has(repo.full_name) || repo.full_name === syncingRepo || selectedBranchLoading(repo);
 }
@@ -614,9 +648,26 @@ function repositoryNote(repo) {
 function BranchPicker({ repo, t, disabled = false, onChange }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const pickerRef = useRef(null);
   const branches = repo.branches || [];
   const selected = branches.find((branch) => branch.ref === repo.selected_branch_ref) || branches[0];
   const filtered = branches.filter((branch) => branch.name.toLowerCase().includes(query.toLowerCase()));
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const closeOnOutsideClick = (event) => {
+      if (!pickerRef.current?.contains(event.target)) setOpen(false);
+    };
+    const closeOnEscape = (event) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
 
   if (!branches.length) {
     return (
@@ -630,7 +681,7 @@ function BranchPicker({ repo, t, disabled = false, onChange }) {
   return (
     <div className="branch-field">
       <span>{t.targetBranch}</span>
-      <div className="branch-picker">
+      <div className="branch-picker" ref={pickerRef}>
         <button type="button" className="branch-trigger" disabled={disabled} onClick={() => setOpen((value) => !value)}>
           <BranchLabel branch={selected} t={t} />
           <span className="branch-arrow" />
@@ -671,6 +722,7 @@ function BranchLabel({ branch, t }) {
     <span className="branch-label">
       <span className="branch-name">{branch.name}</span>
       <span className={`branch-kind ${branch.kind}`}>{branch.kind === "local" ? t.localBranch : t.remoteBranch}</span>
+      {branch.kind === "local" && branch.is_remote_missing ? <span className="branch-kind local-only" title={t.localOnlyBranchTip}>{t.localOnlyBranch}</span> : null}
       {branch.loading ? <span className="branch-loading" aria-label={t.branchLoading} /> : null}
     </span>
   );
@@ -701,14 +753,17 @@ function ProgressPanel({ progress, results, onClear, t, language }) {
       {progress.current ? <div className="progress-current">{progress.current}</div> : null}
       {expanded && results.length ? (
         <div className="progress-results">
-          {results.map((item) => (
-            <div className={`progress-row ${item.success ? "success" : "failed"}`} key={`${item.full_name}-${item.action}`}>
-              {item.success ? <Check size={15} /> : <X size={15} />}
-              <span>{item.full_name}</span>
-              <em>{t.action[item.action] || item.action}</em>
-              <p>{localizeBackendText(item.message, language)}</p>
-            </div>
-          ))}
+          {results.map((item) => {
+            const outcome = syncOutcome(item);
+            return (
+              <div className={`progress-row ${outcome}`} key={`${item.full_name}-${item.action}`}>
+                {outcome === "success" ? <Check size={15} /> : outcome === "skipped" ? <Info size={15} /> : <X size={15} />}
+                <span>{item.full_name}</span>
+                <em>{t.action[item.action] || item.action}</em>
+                <p>{localizeBackendText(item.message, language)}</p>
+              </div>
+            );
+          })}
         </div>
       ) : null}
     </section>
@@ -787,6 +842,10 @@ function needsAttention(localStatus) {
   return ["conflict", "local_changes", "local_ahead", "diverged", "unknown"].includes(localStatus);
 }
 
+function syncOutcome(item) {
+  return item.outcome || (item.success ? "success" : "failed");
+}
+
 async function postJson(path, payload, t = translations.zh) {
   const response = await fetch(`${API}${path}`, {
     method: "POST",
@@ -843,6 +902,8 @@ function localizeBackendText(value, language) {
     [/无法获取远端状态，可尝试同步或检查凭证/g, "Unable to fetch remote state. Try syncing or check credentials"],
     [/无法识别当前分支/g, "Unable to detect current branch"],
     [/找不到对应的远端分支/g, "No matching remote branch found"],
+    [/当前本地分支没有对应的远端分支 ([^\n]+)/g, "Current local branch has no matching remote branch $1"],
+    [/本地分支 ([^\s]+) 没有对应的远端分支 ([^\n]+)，已跳过/g, "Local branch $1 has no matching remote branch $2. Skipped"],
     [/找不到远端分支 ([^\n]+)/g, "Remote branch $1 was not found"],
     [/无法比较本地与远端提交/g, "Unable to compare local and remote commits"],
     [/已是最新/g, "Already up to date"],

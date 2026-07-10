@@ -18,6 +18,7 @@ LocalStatus = Literal[
     "conflict",
 ]
 SyncAction = Literal["clone", "pull", "skip"]
+SyncOutcome = Literal["success", "skipped", "failed"]
 CloneProtocol = Literal["http", "ssh"]
 BranchKind = Literal["local", "remote"]
 
@@ -62,6 +63,7 @@ class BranchOption(BaseModel):
     kind: BranchKind
     is_current: bool = False
     is_default: bool = False
+    is_remote_missing: bool = False
     sync_status: str = ""
     note: str = ""
 
@@ -94,6 +96,7 @@ class SyncItemResult(BaseModel):
     local_path: str
     action: SyncAction
     success: bool
+    outcome: SyncOutcome
     message: str
 
 

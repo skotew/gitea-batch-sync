@@ -118,10 +118,27 @@ def sync_repository(repo: RepoInfo, config: GiteaConfig) -> SyncItemResult:
                     local_path=repo.local_path,
                     action="skip",
                     success=False,
+                    outcome="skipped",
                     message="本地已跟踪文件存在未提交修改，已跳过",
                 )
             env, cleanup_path = _git_env(config)
-            result = _sync_selected_branch(repo, local_path, env)
+            fetch = _run_git(["fetch", "--quiet", "origin"], local_path, env=env, timeout=90)
+            if fetch.returncode != 0:
+                logger.warning("sync fetch failed full_name=%s returncode=%s stderr=%s", repo.full_name, fetch.returncode, fetch.stderr.strip()[-500:])
+                result = fetch
+            else:
+                local_only_note = _local_only_branch_note(repo, local_path)
+                if local_only_note:
+                    logger.info("sync skipped for local-only branch full_name=%s branch=%s", repo.full_name, repo.selected_branch_ref)
+                    return SyncItemResult(
+                        full_name=repo.full_name,
+                        local_path=repo.local_path,
+                        action="skip",
+                        success=False,
+                        outcome="skipped",
+                        message=local_only_note,
+                    )
+                result = _sync_selected_branch(repo, local_path, env)
         else:
             logger.info("sync skipped full_name=%s status=%s note=%s", repo.full_name, repo.local_status, repo.note)
             return SyncItemResult(
@@ -129,6 +146,7 @@ def sync_repository(repo: RepoInfo, config: GiteaConfig) -> SyncItemResult:
                 local_path=repo.local_path,
                 action=repo.action,
                 success=False,
+                outcome="skipped",
                 message=repo.note or "已跳过",
             )
     finally:
@@ -142,6 +160,7 @@ def sync_repository(repo: RepoInfo, config: GiteaConfig) -> SyncItemResult:
         local_path=repo.local_path,
         action=repo.action,
         success=success,
+        outcome="success" if success else "failed",
         message=message,
     )
 
@@ -167,7 +186,7 @@ def inspect_branch_status(repo: RepoInfo, config: GiteaConfig) -> BranchOption:
             return branch.model_copy(update={"sync_status": "unknown", "note": "无法获取远端状态，可尝试同步或检查凭证"})
         state = _local_branch_sync_state(local_path, name)
         logger.info("branch status refreshed full_name=%s branch=%s status=%s note=%s", repo.full_name, name, state.get("sync_status"), state.get("note"))
-        return branch.model_copy(update=state)
+        return branch.model_copy(update={**state, "is_remote_missing": _remote_branch_missing(local_path, name)})
     finally:
         if cleanup_path:
             cleanup_path.unlink(missing_ok=True)
@@ -200,6 +219,7 @@ def _local_repo_branch_options(local_path: Path, default_branch: str) -> list[Br
         for name in _git_lines(["for-each-ref", "--format=%(refname:short)", "refs/remotes/origin"], local_path)
         if name != "origin/HEAD"
     ]
+    remote_branch_names = {name.removeprefix("origin/") for name in remote_names}
     result = [
         BranchOption(
             name=name,
@@ -207,6 +227,7 @@ def _local_repo_branch_options(local_path: Path, default_branch: str) -> list[Br
             kind="local",
             is_current=name == current,
             is_default=name == default_branch,
+            is_remote_missing=name not in remote_branch_names,
             **(_local_branch_sync_state(local_path, name) if name == current else {}),
         )
         for name in local_names
@@ -315,11 +336,14 @@ def _inspect_remote_state(
         if fetch.returncode != 0:
             logger.warning("fetch failed path=%s returncode=%s stderr=%s", local_path, fetch.returncode, fetch.stderr.strip()[-500:])
             return "unknown", origin, "无法获取远端状态，可尝试同步或检查凭证"
-        branch = _current_branch(local_path) or default_branch
+        current_branch = _current_branch(local_path)
+        branch = current_branch or default_branch
         if not branch:
             return "unknown", origin, "无法识别当前分支"
         remote_ref = f"origin/{branch}"
         if _run_git(["rev-parse", "--verify", "--quiet", remote_ref], local_path).returncode != 0:
+            if current_branch:
+                return "unknown", origin, f"当前本地分支没有对应的远端分支 {remote_ref}"
             if default_branch:
                 remote_ref = f"origin/{default_branch}"
             if _run_git(["rev-parse", "--verify", "--quiet", remote_ref], local_path).returncode != 0:
@@ -348,11 +372,6 @@ def _current_branch(local_path: Path) -> str:
 
 
 def _sync_selected_branch(repo: RepoInfo, local_path: Path, env: dict[str, str] | None) -> subprocess.CompletedProcess[str]:
-    fetch = _run_git(["fetch", "--quiet", "origin"], local_path, env=env, timeout=90)
-    if fetch.returncode != 0:
-        logger.warning("sync fetch failed full_name=%s returncode=%s stderr=%s", repo.full_name, fetch.returncode, fetch.stderr.strip()[-500:])
-        return fetch
-
     selected = repo.selected_branch_ref or f"local:{_current_branch(local_path)}"
     kind, name = _parse_branch_ref(selected)
     if not name:
@@ -406,6 +425,18 @@ def _branch_name_from_ref(value: str) -> str:
 
 def _local_branch_exists(local_path: Path, branch: str) -> bool:
     return _run_git(["rev-parse", "--verify", "--quiet", branch], local_path).returncode == 0
+
+
+def _remote_branch_missing(local_path: Path, branch: str) -> bool:
+    return _run_git(["rev-parse", "--verify", "--quiet", f"origin/{branch}"], local_path).returncode != 0
+
+
+def _local_only_branch_note(repo: RepoInfo, local_path: Path) -> str:
+    selected = repo.selected_branch_ref or f"local:{_current_branch(local_path)}"
+    kind, name = _parse_branch_ref(selected)
+    if kind != "local" or not name or not _remote_branch_missing(local_path, name):
+        return ""
+    return f"本地分支 {name} 没有对应的远端分支 origin/{name}，已跳过"
 
 
 def _can_fast_forward(local_path: Path, local_branch: str, remote_ref: str) -> bool:

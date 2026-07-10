@@ -12,14 +12,15 @@ Gitea 提供 `/api/v1` REST API，可以通过 token 或用户名密码访问当
 
 - 本地目录不存在：`clone`
 - 本地目录存在且 origin 匹配：先 `fetch origin`，再比较 `HEAD...origin/<当前分支>`
-- 用户可为每个仓库选择目标分支，分支选项会标注本地或远程；仓库列表只加载当前本地分支状态，选择其他本地分支时再按需刷新该分支状态
+- 当前本地分支没有对应的 `origin/<branch>`：标记为未知并跳过，不会回退为比较默认分支
+- 用户可为每个仓库选择目标分支，分支选项会标注本地或远程；没有对应 `origin/<branch>` 的本地分支会额外标注“仅本地”，不会参与同步
 - 当前本地分支：`git pull --ff-only origin <branch>`
 - 非当前本地分支：不切换工作区，只在可 fast-forward 时移动本地分支指针
 - 远程分支：以远程分支为来源创建或更新本地同名分支；新建本地分支或更新非当前本地分支时会设置 upstream，当前分支则使用显式 pull 更新
 - 已跟踪文件有未提交修改、目标分支无法 fast-forward 或状态未知：默认跳过并标注状态
 - 本地目录存在但不是 Git 仓库，或 origin 不一致：`skip` 并标记冲突
 
-同步执行时前端会先锁定本批次选中的所有仓库，再逐个仓库调用后端接口，展示当前进度、每个仓库的成功/失败和 Git 输出摘要。当前正在同步的仓库卡片会显示 loading；本批次内的仓库都会暂时禁用选择和分支切换操作，避免同步过程中修改目标。
+同步执行时前端会先锁定本批次选中的所有仓库，再逐个仓库调用后端接口，展示当前进度、每个仓库的成功、跳过、失败和 Git 输出摘要。当前正在同步的仓库卡片会显示 loading；本批次内的仓库都会暂时禁用选择和分支切换操作，避免同步过程中修改目标。
 
 冲突处理边界：
 
@@ -66,14 +67,15 @@ npm --prefix frontend run dev
 
 - 仓库列表加载时只计算当前本地分支与远端的差异，避免一次性检查所有分支导致列表加载过慢。
 - 选择其他本地分支时，前端会单独刷新该分支与 `origin/<branch>` 的状态；刷新期间该仓库卡片会显示 loading，并暂时禁用卡片操作。
+- “仅本地”标签表示该本地分支没有对应的 `origin/<branch>`，通常是尚未推送到远端或远端分支已删除；工具只做标识，不会同步该分支。
 - 选择远程分支时不会做本地 ahead/behind 对比；同步时会以该远程分支为来源创建或更新本地同名分支。新建本地分支或更新非当前本地分支时会设置 upstream 到对应的 `origin/<branch>`；如果同名本地分支正好是当前分支，则使用显式 pull 更新。
-- 同步接口在后端仍会重新检查工作区、origin、未提交的已跟踪文件和 fast-forward 条件，前端状态只用于展示和交互。
+- 同步接口在后端仍会重新检查工作区、origin、未提交的已跟踪文件、仅本地分支和 fast-forward 条件，前端状态只用于展示和交互。
 
 ## 配置说明
 
 - `Gitea URL`: Gitea 根地址，例如 `https://gitea.example.com`
 - `Gitea API 认证`: 用于获取仓库列表，默认使用用户名密码；也可以切换为 token
-- `Git clone 协议`: 只决定 clone/pull 使用 HTTP(S) 地址还是 SSH 地址
+- `新仓库 Clone 协议`: 只决定新 clone 仓库使用 HTTP(S) 地址还是 SSH 地址；不会改写已有仓库的 origin
 - `SSH key 文件路径`: 仅 SSH 模式可填。留空时使用本机 ssh-agent 或 `~/.ssh/config`；填写时后端只把路径传给 git，不读取、不保存私钥内容
 - `本地目标路径`: clone/pull 的父目录
 - `本地目录结构`:
@@ -83,6 +85,7 @@ npm --prefix frontend run dev
 认证和 clone 协议的关系：
 
 - Token / 用户名密码只用于 Gitea API，不决定本地目录结构。
+- 已有仓库始终通过自身 `origin` 更新。切换页面协议不会自动修改 `origin`；若页面协议与已有 `origin` 不一致，仓库会标记为冲突，需先在本地手动调整 `origin`。
 - SSH clone/pull 使用本机 SSH key，不使用页面里的密码或 token。
 - 指定 SSH key 路径时，后端执行 git 时临时设置 `GIT_SSH_COMMAND="ssh -i <key> -o IdentitiesOnly=yes"`。
 - HTTP(S) clone/pull 会通过临时 `GIT_ASKPASS` 使用页面里的认证信息，不会把用户名密码或 token 写入 remote URL。
